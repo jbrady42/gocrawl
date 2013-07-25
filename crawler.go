@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"fmt"
 )
 
 // Communication from worker to the master crawler, about the crawling of a URL
@@ -28,12 +29,14 @@ type Crawler struct {
 	wg              *sync.WaitGroup
 	pushPopRefCount int
 	visits          int
+	workerCount		int
 
 	// keep lookups in maps, O(1) access time vs O(n) for slice. The empty struct value
 	// is of no use, but this is the smallest type possible - it uses no memory at all.
 	visited map[string]struct{}
 	hosts   map[string]struct{}
 	workers map[string]*worker
+	queuedWorkers map[string]*worker
 }
 
 // Crawler constructor with a pre-initialized Options object.
@@ -96,10 +99,10 @@ func (this *Crawler) init(ctxs []*URLContext) {
 	// to communicate back to the crawler)
 	this.stop = make(chan struct{})
 	if this.Options.SameHostOnly {
-		this.workers, this.push = make(map[string]*worker, hostCount),
+		this.workers, this.queuedWorkers, this.push = make(map[string]*worker, hostCount), make(map[string]*worker, hostCount),
 			make(chan *workerResponse, hostCount)
 	} else {
-		this.workers, this.push = make(map[string]*worker, this.Options.HostBufferFactor*hostCount),
+		this.workers, this.queuedWorkers, this.push = make(map[string]*worker, this.Options.HostBufferFactor*hostCount),make(map[string]*worker, this.Options.HostBufferFactor*hostCount),
 			make(chan *workerResponse, this.Options.HostBufferFactor*hostCount)
 	}
 	// Create and pass the enqueue channel
@@ -145,10 +148,10 @@ func (this *Crawler) setExtenderEnqueueChan() {
 	ec.Set(src)
 }
 
-// Launch a new worker goroutine for a given host.
-func (this *Crawler) launchWorker(ctx *URLContext) *worker {
+// Queue a new worker goroutine for a given host.
+func (this *Crawler) queueWorker(ctx *URLContext) *worker {
 	// Initialize index and channels
-	i := len(this.workers) + 1
+	i := len(this.workers) + len(this.queuedWorkers) + 1
 	pop := newPopChannel()
 
 	// Create the worker
@@ -167,12 +170,38 @@ func (this *Crawler) launchWorker(ctx *URLContext) *worker {
 	// Increment wait group count
 	this.wg.Add(1)
 
-	// Launch worker
-	go w.run()
-	this.logFunc(LogInfo, "worker %d launched for host %s", i, w.host)
-	this.workers[w.host] = w
-
+	
+	this.logFunc(LogInfo, "worker %d queued for host %s", i, w.host)
+	this.queuedWorkers[w.host] = w
+	this.checkWorkers()
 	return w
+}
+// 
+func (this *Crawler) checkWorkers() {
+	if this.workerCount < this.Options.MaxWorkers {
+		diff := this.Options.MaxWorkers - this.workerCount
+		a := 0 //Counter
+		keys := make(map[string]interface{}, diff)
+		for k := range this.queuedWorkers {
+			a++
+			keys[k] = true
+			if a == diff {
+				break
+			}
+		}
+
+		for k := range keys {
+			w := this.queuedWorkers[k]
+			fmt.Println("Key: " + k)
+			// Launch worker
+			go w.run()
+			this.workerCount += 1
+			delete(this.queuedWorkers, k)
+			this.workers[k] = w
+		}
+		
+
+	}
 }
 
 // Check if the specified URL is from the same host as its source URL, or if
@@ -235,16 +264,21 @@ func (this *Crawler) enqueueUrls(ctxs []*URLContext) (cnt int) {
 			// Launch worker if required, based on the host of the normalized URL
 			w, ok := this.workers[ctx.normalizedURL.Host]
 			if !ok {
-				// No worker exists for this host, launch a new one
-				w = this.launchWorker(ctx)
-				// Automatically enqueue the robots.txt URL as first in line
-				if robCtx, e := ctx.getRobotsURLCtx(); e != nil {
-					this.Options.Extender.Error(newCrawlError(ctx, e, CekParseRobots))
-					this.logFunc(LogError, "ERROR parsing robots.txt from %s: %s", ctx.normalizedURL, e)
-				} else {
-					this.logFunc(LogEnqueued, "enqueue: %s", robCtx.url)
-					this.Options.Extender.Enqueued(robCtx)
-					w.pop.stack(robCtx)
+				//check if it is in the queue
+				w, ok = this.queuedWorkers[ctx.normalizedURL.Host]
+				if !ok {
+					
+					// No worker exists for this host, launch a new one
+					w = this.queueWorker(ctx)
+					// Automatically enqueue the robots.txt URL as first in line
+					if robCtx, e := ctx.getRobotsURLCtx(); e != nil {
+						this.Options.Extender.Error(newCrawlError(ctx, e, CekParseRobots))
+						this.logFunc(LogError, "ERROR parsing robots.txt from %s: %s", ctx.normalizedURL, e)
+					} else {
+						this.logFunc(LogEnqueued, "enqueue: %s", robCtx.url)
+						this.Options.Extender.Enqueued(robCtx)
+						w.pop.stack(robCtx)
+					}
 				}
 			}
 
@@ -253,6 +287,8 @@ func (this *Crawler) enqueueUrls(ctxs []*URLContext) (cnt int) {
 			this.Options.Extender.Enqueued(ctx)
 			w.pop.stack(ctx)
 			this.pushPopRefCount++
+
+			
 
 			// Once it is stacked, it WILL be visited eventually, so add it to the visited slice
 			// (unless denied by robots.txt, but this is out of our hands, for all we
@@ -306,6 +342,7 @@ func (this *Crawler) collectUrls() error {
 				// The worker timed out from its Idle TTL delay, remove from active workers
 				delete(this.workers, res.host)
 				this.logFunc(LogInfo, "worker for host %s cleared on idle policy", res.host)
+				this.workerCount -= 1
 			} else {
 				this.enqueueUrls(this.toURLContexts(res.harvestedURLs, res.ctx.url))
 				this.pushPopRefCount--

@@ -14,6 +14,7 @@ const (
 	DefaultCrawlDelay         time.Duration             = 5 * time.Second
 	DefaultIdleTTL            time.Duration             = 10 * time.Second
 	DefaultNormalizationFlags purell.NormalizationFlags = purell.FlagsAllGreedy
+	DefaultMaxWorkers			int						= 500
 )
 
 // The Options available to control and customize the crawling process.
@@ -25,11 +26,13 @@ type Options struct {
 	HostBufferFactor      int
 	CrawlDelay            time.Duration // Applied per host
 	WorkerIdleTTL         time.Duration
+	MaxWorkers			int	
 	SameHostOnly          bool
 	HeadBeforeGet         bool
 	URLNormalizationFlags purell.NormalizationFlags
 	LogFlags              LogFlags
 	Extender              Extender
+	
 }
 
 func NewOptions(ext Extender) *Options {
@@ -42,6 +45,7 @@ func NewOptions(ext Extender) *Options {
 		DefaultHostBufferFactor,
 		DefaultCrawlDelay,
 		DefaultIdleTTL,
+		DefaultMaxWorkers,
 		true,
 		false,
 		DefaultNormalizationFlags,
