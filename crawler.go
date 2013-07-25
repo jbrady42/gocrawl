@@ -254,14 +254,38 @@ func (this *Crawler) enqueueUrls(ctxs []*URLContext) (cnt int) {
 		} else {
 			// All is good, visit this URL (robots.txt verification is done by worker)
 
+
+
+
+			if this.enqueueUrl(ctx) {
+				cnt++
+			
+
+			
+
+				// Once it is stacked, it WILL be visited eventually, so add it to the visited slice
+				// (unless denied by robots.txt, but this is out of our hands, for all we
+				// care, it is visited).
+				if !isVisited {
+					// The visited map works with the normalized URL
+					this.visited[ctx.normalizedURL.String()] = struct{}{}
+				}
+			}
+		}
+	}
+	return
+}
 			// Possible caveat: if the normalization changes the host, it is possible
 			// that the robots.txt fetched for this host would differ from the one for
 			// the unnormalized host. However, this should be rare, and is a weird
 			// behaviour from the host (i.e. why would site.com differ in its rules
 			// from www.site.com) and can be fixed by using a different normalization
 			// flag. So this is an acceptable behaviour for gocrawl.
+func (this *Crawler) enqueueUrl(ctx *URLContext) bool {
+// Launch worker if required, based on the host of the normalized URL
+	requeue := this.Options.Extender.Enqueued(ctx)
+	if requeue {
 
-			// Launch worker if required, based on the host of the normalized URL
 			w, ok := this.workers[ctx.normalizedURL.Host]
 			if !ok {
 				//check if it is in the queue
@@ -282,24 +306,15 @@ func (this *Crawler) enqueueUrls(ctxs []*URLContext) (cnt int) {
 				}
 			}
 
-			cnt++
+		
 			this.logFunc(LogEnqueued, "enqueue: %s", ctx.url)
-			this.Options.Extender.Enqueued(ctx)
+			
 			w.pop.stack(ctx)
 			this.pushPopRefCount++
 
-			
-
-			// Once it is stacked, it WILL be visited eventually, so add it to the visited slice
-			// (unless denied by robots.txt, but this is out of our hands, for all we
-			// care, it is visited).
-			if !isVisited {
-				// The visited map works with the normalized URL
-				this.visited[ctx.normalizedURL.String()] = struct{}{}
-			}
-		}
+			return true
 	}
-	return
+	return false
 }
 
 // This is the main loop of the crawler, waiting for responses from the workers

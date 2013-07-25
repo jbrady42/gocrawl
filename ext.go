@@ -44,7 +44,7 @@ type Extender interface {
 	RequestRobots(*URLContext, string) ([]byte, bool)
 	FetchedRobots(*URLContext, *http.Response)
 	Filter(*URLContext, bool) bool
-	Enqueued(*URLContext)
+	Enqueued(*URLContext) bool
 	Visit(*URLContext, *http.Response, *goquery.Document) (interface{}, bool)
 	Visited(*URLContext, interface{})
 	Disallowed(*URLContext)
@@ -163,8 +163,10 @@ func (this *DefaultExtender) Filter(ctx *URLContext, isVisited bool) bool {
 	return !isVisited
 }
 
-// Enqueued is a no-op.
-func (this *DefaultExtender) Enqueued(ctx *URLContext) {}
+// Enqueued. Return ture to requeue milled links.
+func (this *DefaultExtender) Enqueued(ctx *URLContext) bool {
+	return true
+}
 
 // Ask the worker to harvest the links in this page.
 func (this *DefaultExtender) Visit(ctx *URLContext, res *http.Response, doc *goquery.Document) (harvested interface{}, findLinks bool) {
