@@ -63,8 +63,10 @@ func (this *Crawler) Run(seeds interface{}) error {
 	ctxs := this.toURLContexts(seeds, nil)
 	this.init(ctxs)
 
+	this.Options.Extender.PostStart()	
+
 	// Start with the seeds, and loop till death
-	this.enqueueUrls(ctxs)
+	this.reEnqueueUrls(ctxs)
 	err := this.collectUrls()
 
 	this.Options.Extender.End(err)
@@ -221,12 +223,42 @@ func (this *Crawler) isSameHost(ctx *URLContext) bool {
 // selection policies.
 func (this *Crawler) enqueueUrls(ctxs []*URLContext) (cnt int) {
 	for _, ctx := range ctxs {
-		var isVisited, enqueue bool
+		if this.filterUrl(ctx) {
+			// All is good, visit this URL (robots.txt verification is done by worker)
+			if this.enqueueUrl(ctx, false) {
+				cnt++
+				// Once it is stacked, it WILL be visited eventually, so add it to the visited slice
+				// (unless denied by robots.txt, but this is out of our hands, for all we
+				// care, it is visited).
+				//if !isVisited {
+					// The visited map works with the normalized URL
+				//	this.visited[ctx.normalizedURL.String()] = struct{}{}
+				//}
+			}
+		}
+	}
+	return
+}
+
+func (this *Crawler) reEnqueueUrls(ctxs []*URLContext) (cnt int) {
+	for _, ctx := range ctxs {
+		if this.filterUrl(ctx) {
+			if this.enqueueUrl(ctx, true) {
+				cnt++
+			}
+		}
+	}
+	return
+}
+
+func (this *Crawler) filterUrl(ctx *URLContext) (filter bool) {
+	var isVisited, enqueue bool
+	filter = false
 
 		// Cannot directly enqueue a robots.txt URL, since it is managed as a special case
 		// in the worker (doesn't return a response to crawler).
 		if ctx.IsRobotsURL() {
-			continue
+			return
 		}
 		// Check if it has been visited before, using the normalized URL
 		_, isVisited = this.visited[ctx.normalizedURL.String()]
@@ -235,7 +267,7 @@ func (this *Crawler) enqueueUrls(ctxs []*URLContext) (cnt int) {
 		if enqueue = this.Options.Extender.Filter(ctx, isVisited); !enqueue {
 			// Filter said NOT to use this url, so continue with next
 			this.logFunc(LogIgnored, "ignore on filter policy: %s", ctx.normalizedURL)
-			continue
+			return
 		}
 
 		// Even if filter said to use the URL, it still MUST be absolute, http(s)-prefixed,
@@ -253,27 +285,10 @@ func (this *Crawler) enqueueUrls(ctxs []*URLContext) (cnt int) {
 
 		} else {
 			// All is good, visit this URL (robots.txt verification is done by worker)
+			filter = true
 
-
-
-
-			if this.enqueueUrl(ctx) {
-				cnt++
-			
-
-			
-
-				// Once it is stacked, it WILL be visited eventually, so add it to the visited slice
-				// (unless denied by robots.txt, but this is out of our hands, for all we
-				// care, it is visited).
-				if !isVisited {
-					// The visited map works with the normalized URL
-					this.visited[ctx.normalizedURL.String()] = struct{}{}
-				}
-			}
 		}
-	}
-	return
+		return filter
 }
 			// Possible caveat: if the normalization changes the host, it is possible
 			// that the robots.txt fetched for this host would differ from the one for
@@ -281,10 +296,13 @@ func (this *Crawler) enqueueUrls(ctxs []*URLContext) (cnt int) {
 			// behaviour from the host (i.e. why would site.com differ in its rules
 			// from www.site.com) and can be fixed by using a different normalization
 			// flag. So this is an acceptable behaviour for gocrawl.
-func (this *Crawler) enqueueUrl(ctx *URLContext) bool {
+func (this *Crawler) enqueueUrl(ctx *URLContext, rque bool) bool {
+	requeue := false
 // Launch worker if required, based on the host of the normalized URL
-	requeue := this.Options.Extender.Enqueued(ctx)
-	if requeue {
+	if(!rque) {
+		requeue = this.Options.Extender.Enqueued(ctx)
+	}
+	if requeue || rque {
 
 			w, ok := this.workers[ctx.normalizedURL.Host]
 			if !ok {
@@ -335,7 +353,7 @@ func (this *Crawler) collectUrls() error {
 		//
 		// Check if refcount is zero - MUST be before the select statement, so that if
 		// no valid seeds are enqueued, the crawler stops.
-		if this.pushPopRefCount == 0 && len(this.enqueue) == 0 {
+		if this.pushPopRefCount == 0 && len(this.enqueue) == 0 && false {
 			this.logFunc(LogInfo, "sending STOP signals...")
 			close(this.stop)
 			return nil
@@ -367,7 +385,7 @@ func (this *Crawler) collectUrls() error {
 			// Received a command to enqueue a URL, proceed
 			ctxs := this.toURLContexts(enq, nil)
 			this.logFunc(LogTrace, "receive url(s) to enqueue %v", ctxs)
-			this.enqueueUrls(ctxs)
+			this.reEnqueueUrls(ctxs)
 		}
 	}
 	panic("unreachable")

@@ -29,6 +29,7 @@ type Extender interface {
 	// Start, End, Error and Log are not related to a specific URL, so they don't
 	// receive a URLContext struct.
 	Start(interface{}) interface{}
+	PostStart()
 	End(error)
 	Error(*CrawlError)
 	Log(LogFlags, LogFlags, string)
@@ -80,6 +81,8 @@ type DefaultExtender struct {
 func (this *DefaultExtender) Start(seeds interface{}) interface{} {
 	return seeds
 }
+// Stub for callback
+func (this *DefaultExtender) PostStart() {}
 
 // End is a no-op.
 func (this *DefaultExtender) End(err error) {}
