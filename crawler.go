@@ -2,10 +2,10 @@
 package gocrawl
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
-	"fmt"
 )
 
 // Communication from worker to the master crawler, about the crawling of a URL
@@ -22,20 +22,22 @@ type Crawler struct {
 	Options *Options
 
 	// Internal fields
-	logFunc         func(LogFlags, string, ...interface{})
-	push            chan *workerResponse
-	enqueue         chan interface{}
+	logFunc       func(LogFlags, string, ...interface{})
+	push          chan *workerResponse
+	enqueue       chan interface{}
+	workerEnqueue chan interface{}
+
 	stop            chan struct{}
 	wg              *sync.WaitGroup
 	pushPopRefCount int
 	visits          int
-	workerCount		int
+	workerCount     int
 
 	// keep lookups in maps, O(1) access time vs O(n) for slice. The empty struct value
 	// is of no use, but this is the smallest type possible - it uses no memory at all.
-	visited map[string]struct{}
-	hosts   map[string]struct{}
-	workers map[string]*worker
+	visited       map[string]struct{}
+	hosts         map[string]struct{}
+	workers       map[string]*worker
 	queuedWorkers map[string]*worker
 }
 
@@ -63,7 +65,7 @@ func (this *Crawler) Run(seeds interface{}) error {
 	ctxs := this.toURLContexts(seeds, nil)
 	this.init(ctxs)
 
-	this.Options.Extender.PostStart()	
+	this.Options.Extender.PostStart()
 
 	// Start with the seeds, and loop till death
 	this.reEnqueueUrls(ctxs)
@@ -104,11 +106,12 @@ func (this *Crawler) init(ctxs []*URLContext) {
 		this.workers, this.queuedWorkers, this.push = make(map[string]*worker, hostCount), make(map[string]*worker, hostCount),
 			make(chan *workerResponse, hostCount)
 	} else {
-		this.workers, this.queuedWorkers, this.push = make(map[string]*worker, this.Options.HostBufferFactor*hostCount),make(map[string]*worker, this.Options.HostBufferFactor*hostCount),
+		this.workers, this.queuedWorkers, this.push = make(map[string]*worker, this.Options.HostBufferFactor*hostCount), make(map[string]*worker, this.Options.HostBufferFactor*hostCount),
 			make(chan *workerResponse, this.Options.HostBufferFactor*hostCount)
 	}
 	// Create and pass the enqueue channel
 	this.enqueue = make(chan interface{}, this.Options.EnqueueChanBuffer)
+	this.workerEnqueue = make(chan interface{}, this.Options.MaxWorkers)
 	this.setExtenderEnqueueChan()
 }
 
@@ -163,7 +166,7 @@ func (this *Crawler) queueWorker(ctx *URLContext) *worker {
 		push:    this.push,
 		pop:     pop,
 		stop:    this.stop,
-		enqueue: this.enqueue,
+		enqueue: this.workerEnqueue,
 		wg:      this.wg,
 		logFunc: getLogFunc(this.Options.Extender, this.Options.LogFlags, i),
 		opts:    this.Options,
@@ -172,16 +175,16 @@ func (this *Crawler) queueWorker(ctx *URLContext) *worker {
 	// Increment wait group count
 	this.wg.Add(1)
 
-	
 	this.logFunc(LogInfo, "worker %d queued for host %s", i, w.host)
 	this.queuedWorkers[w.host] = w
 	this.checkWorkers()
 	return w
 }
-// 
+
+//
 func (this *Crawler) checkWorkers() {
 	if this.workerCount < this.Options.MaxWorkers {
-		diff := this.Options.MaxWorkers - this.workerCount
+		diff := this.Options.MaxWorkers - this.workerCount - 1
 		a := 0 //Counter
 		keys := make(map[string]interface{}, diff)
 		for k := range this.queuedWorkers {
@@ -191,6 +194,7 @@ func (this *Crawler) checkWorkers() {
 				break
 			}
 		}
+		fmt.Printf("checkWorkers launching %v of %v queued workers. Free capacity %v\n", len(keys), len(this.queuedWorkers), diff)
 
 		for k := range keys {
 			w := this.queuedWorkers[k]
@@ -198,11 +202,9 @@ func (this *Crawler) checkWorkers() {
 			// Launch worker
 			go w.run()
 			this.workerCount += 1
-			delete(this.queuedWorkers, k)
 			this.workers[k] = w
+			delete(this.queuedWorkers, k)
 		}
-		
-
 	}
 }
 
@@ -231,7 +233,7 @@ func (this *Crawler) enqueueUrls(ctxs []*URLContext) (cnt int) {
 				// (unless denied by robots.txt, but this is out of our hands, for all we
 				// care, it is visited).
 				//if !isVisited {
-					// The visited map works with the normalized URL
+				// The visited map works with the normalized URL
 				//	this.visited[ctx.normalizedURL.String()] = struct{}{}
 				//}
 			}
@@ -242,97 +244,126 @@ func (this *Crawler) enqueueUrls(ctxs []*URLContext) (cnt int) {
 
 func (this *Crawler) reEnqueueUrls(ctxs []*URLContext) (cnt int) {
 	for _, ctx := range ctxs {
-		if this.filterUrl(ctx) {
+		if this.filterQueUrls(ctx) {
 			if this.enqueueUrl(ctx, true) {
 				cnt++
 			}
 		}
+
 	}
 	return
+}
+
+func (this *Crawler) filterQueUrls(ctx *URLContext) (filter bool) {
+	var isVisited, enqueue bool
+	filter = false
+
+	// Check if it has been visited before, using the normalized URL
+	//_, isVisited = this.visited[ctx.normalizedURL.String()]
+	isVisited = !this.urlNeedsVisit(ctx)
+	// Filter the URL
+	if enqueue = this.Options.Extender.Filter(ctx, isVisited); !enqueue {
+		// Filter said NOT to use this url, so continue with next
+		this.logFunc(LogIgnored, "ignore on filter policy: %s visited %v", ctx.normalizedURL, isVisited)
+		return
+	}
+	filter = true
+	return filter
 }
 
 func (this *Crawler) filterUrl(ctx *URLContext) (filter bool) {
 	var isVisited, enqueue bool
 	filter = false
 
-		// Cannot directly enqueue a robots.txt URL, since it is managed as a special case
-		// in the worker (doesn't return a response to crawler).
-		if ctx.IsRobotsURL() {
-			return
-		}
-		// Check if it has been visited before, using the normalized URL
-		_, isVisited = this.visited[ctx.normalizedURL.String()]
+	// Cannot directly enqueue a robots.txt URL, since it is managed as a special case
+	// in the worker (doesn't return a response to crawler).
+	if ctx.IsRobotsURL() {
+		return
+	}
+	// Check if it has been visited before, using the normalized URL
+	//_, isVisited = this.visited[ctx.normalizedURL.String()]
+	isVisited = false //!this.urlNeedsVisit(ctx)
+	// Filter the URL
+	if enqueue = this.Options.Extender.Filter(ctx, isVisited); !enqueue {
+		// Filter said NOT to use this url, so continue with next
+		this.logFunc(LogIgnored, "ignore on filter policy: %s visited %v", ctx.normalizedURL, isVisited)
+		return
+	}
 
-		// Filter the URL
-		if enqueue = this.Options.Extender.Filter(ctx, isVisited); !enqueue {
-			// Filter said NOT to use this url, so continue with next
-			this.logFunc(LogIgnored, "ignore on filter policy: %s", ctx.normalizedURL)
-			return
-		}
+	// Even if filter said to use the URL, it still MUST be absolute, http(s)-prefixed,
+	// and comply with the same host policy if requested.
+	if !ctx.normalizedURL.IsAbs() {
+		// Only absolute URLs are processed, so ignore
+		this.logFunc(LogIgnored, "ignore on absolute policy: %s", ctx.normalizedURL)
 
-		// Even if filter said to use the URL, it still MUST be absolute, http(s)-prefixed,
-		// and comply with the same host policy if requested.
-		if !ctx.normalizedURL.IsAbs() {
-			// Only absolute URLs are processed, so ignore
-			this.logFunc(LogIgnored, "ignore on absolute policy: %s", ctx.normalizedURL)
+	} else if !strings.HasPrefix(ctx.normalizedURL.Scheme, "http") {
+		this.logFunc(LogIgnored, "ignore on scheme policy: %s", ctx.normalizedURL)
 
-		} else if !strings.HasPrefix(ctx.normalizedURL.Scheme, "http") {
-			this.logFunc(LogIgnored, "ignore on scheme policy: %s", ctx.normalizedURL)
+	} else if this.Options.SameHostOnly && !this.isSameHost(ctx) {
+		// Only allow URLs coming from the same host
+		this.logFunc(LogIgnored, "ignore on same host policy: %s", ctx.normalizedURL)
 
-		} else if this.Options.SameHostOnly && !this.isSameHost(ctx) {
-			// Only allow URLs coming from the same host
-			this.logFunc(LogIgnored, "ignore on same host policy: %s", ctx.normalizedURL)
+	} else {
+		// All is good, visit this URL (robots.txt verification is done by worker)
+		filter = true
 
-		} else {
-			// All is good, visit this URL (robots.txt verification is done by worker)
-			filter = true
-
-		}
-		return filter
+	}
+	return filter
 }
-			// Possible caveat: if the normalization changes the host, it is possible
-			// that the robots.txt fetched for this host would differ from the one for
-			// the unnormalized host. However, this should be rare, and is a weird
-			// behaviour from the host (i.e. why would site.com differ in its rules
-			// from www.site.com) and can be fixed by using a different normalization
-			// flag. So this is an acceptable behaviour for gocrawl.
+
+// Possible caveat: if the normalization changes the host, it is possible
+// that the robots.txt fetched for this host would differ from the one for
+// the unnormalized host. However, this should be rare, and is a weird
+// behaviour from the host (i.e. why would site.com differ in its rules
+// from www.site.com) and can be fixed by using a different normalization
+// flag. So this is an acceptable behaviour for gocrawl.
 func (this *Crawler) enqueueUrl(ctx *URLContext, rque bool) bool {
 	requeue := false
-// Launch worker if required, based on the host of the normalized URL
-	if(!rque) {
+
+	// Launch worker if required, based on the host of the normalized URL
+	if !rque {
 		requeue = this.Options.Extender.Enqueued(ctx)
 	}
 	if requeue || rque {
 
-			w, ok := this.workers[ctx.normalizedURL.Host]
+		w, ok := this.workers[ctx.normalizedURL.Host]
+		if !ok {
+			//check if it is in the queue
+			w, ok = this.queuedWorkers[ctx.normalizedURL.Host]
 			if !ok {
-				//check if it is in the queue
-				w, ok = this.queuedWorkers[ctx.normalizedURL.Host]
-				if !ok {
-					
-					// No worker exists for this host, launch a new one
-					w = this.queueWorker(ctx)
-					// Automatically enqueue the robots.txt URL as first in line
-					if robCtx, e := ctx.getRobotsURLCtx(); e != nil {
-						this.Options.Extender.Error(newCrawlError(ctx, e, CekParseRobots))
-						this.logFunc(LogError, "ERROR parsing robots.txt from %s: %s", ctx.normalizedURL, e)
-					} else {
-						this.logFunc(LogEnqueued, "enqueue: %s", robCtx.url)
-						this.Options.Extender.Enqueued(robCtx)
-						w.pop.stack(robCtx)
-					}
+
+				// No worker exists for this host, launch a new one
+				w = this.queueWorker(ctx)
+				// Automatically enqueue the robots.txt URL as first in line
+				if robCtx, e := ctx.getRobotsURLCtx(); e != nil {
+					this.Options.Extender.Error(newCrawlError(ctx, e, CekParseRobots))
+					this.logFunc(LogError, "ERROR parsing robots.txt from %s: %s", ctx.normalizedURL, e)
+				} else {
+					this.logFunc(LogEnqueued, "enqueue: %s", robCtx.url)
+					this.Options.Extender.Enqueued(robCtx)
+					w.pop.stack(robCtx)
 				}
 			}
+		}
 
-		
-			this.logFunc(LogEnqueued, "enqueue: %s", ctx.url)
-			
-			w.pop.stack(ctx)
-			this.pushPopRefCount++
+		this.logFunc(LogEnqueued, "enqueue: %s", ctx.url)
 
-			return true
+		w.pop.stack(ctx)
+		this.pushPopRefCount++
+
+		return true
 	}
+	/*
+		_, isVisited := this.visited[ctx.normalizedURL.String()]
+		if !isVisited {
+			// The visited map works with the normalized URL
+			this.visited[ctx.normalizedURL.String()] = struct{}{}
+		}*/
 	return false
+}
+
+func (this *Crawler) urlNeedsVisit(urlz *URLContext) bool {
+	return this.Options.Extender.URLNeedsVisit(urlz)
 }
 
 // This is the main loop of the crawler, waiting for responses from the workers
@@ -353,10 +384,19 @@ func (this *Crawler) collectUrls() error {
 		//
 		// Check if refcount is zero - MUST be before the select statement, so that if
 		// no valid seeds are enqueued, the crawler stops.
+		if len(this.workers) < (this.Options.MaxWorkers) {
+			select {
+			case this.Options.FillQueueChan <- true:
+
+			default:
+			}
+
+		}
+		fmt.Printf("pushPopRefCount: %v enqueue length: %v active workers: %v queued workers: %v\n", this.pushPopRefCount, len(this.enqueue), len(this.workers), len(this.queuedWorkers))
 		if this.pushPopRefCount == 0 && len(this.enqueue) == 0 && false {
 			this.logFunc(LogInfo, "sending STOP signals...")
-			close(this.stop)
-			return nil
+			//close(this.stop)
+			//return nil
 		}
 
 		select {
@@ -375,7 +415,8 @@ func (this *Crawler) collectUrls() error {
 				// The worker timed out from its Idle TTL delay, remove from active workers
 				delete(this.workers, res.host)
 				this.logFunc(LogInfo, "worker for host %s cleared on idle policy", res.host)
-				this.workerCount -= 1
+				this.workerCount--
+				this.checkWorkers()
 			} else {
 				this.enqueueUrls(this.toURLContexts(res.harvestedURLs, res.ctx.url))
 				this.pushPopRefCount--
@@ -384,8 +425,14 @@ func (this *Crawler) collectUrls() error {
 		case enq := <-this.enqueue:
 			// Received a command to enqueue a URL, proceed
 			ctxs := this.toURLContexts(enq, nil)
-			this.logFunc(LogTrace, "receive url(s) to enqueue %v", ctxs)
+			this.logFunc(LogTrace, "crawler collectUrls enqueue receive %v url(s) to enqueue", len(ctxs))
 			this.reEnqueueUrls(ctxs)
+		case wenq := <-this.workerEnqueue:
+			// Received a command to enqueue a URL, proceed
+			ctxs := this.toURLContexts(wenq, nil)
+			this.logFunc(LogTrace, "crawler collectUrls workerEnqueue receive %v url(s) to enqueue", len(ctxs))
+			this.reEnqueueUrls(ctxs)
+
 		}
 	}
 	panic("unreachable")

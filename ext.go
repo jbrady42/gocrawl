@@ -37,7 +37,7 @@ type Extender interface {
 	// ComputeDelay is related to a Host only, not to a URLContext, although the FetchInfo
 	// is related to a URLContext (holds a ctx field).
 	ComputeDelay(string, *DelayInfo, *FetchInfo) time.Duration
-
+	URLNeedsVisit(*URLContext) bool
 	// All other extender methods are executed in the context of an URL, and thus
 	// receive an URLContext struct as first argument.
 	Fetch(*URLContext, string, bool) (*http.Response, error)
@@ -81,6 +81,7 @@ type DefaultExtender struct {
 func (this *DefaultExtender) Start(seeds interface{}) interface{} {
 	return seeds
 }
+
 // Stub for callback
 func (this *DefaultExtender) PostStart() {}
 
@@ -107,6 +108,10 @@ func (this *DefaultExtender) ComputeDelay(host string, di *DelayInfo, lastFetch 
 	return di.OptsDelay
 }
 
+func (this *DefaultExtender) URLNeedsVisit(urlz *URLContext) bool {
+	return false
+}
+
 // Fetch requests the specified URL using the given user agent string. It uses
 // a custom http Client instance that doesn't follow redirections. Instead, the
 // redirected-to URL is enqueued so that it goes through the same Filter() and
@@ -126,7 +131,7 @@ func (this *DefaultExtender) ComputeDelay(host string, di *DelayInfo, lastFetch 
 // allow A, B, and C to be Fetched, while solution 2 would only have required
 // Filter to allow A and C).
 //
-// Solution 2) also has the disadvantage of fetching twice the final URL (once 
+// Solution 2) also has the disadvantage of fetching twice the final URL (once
 // while processing the original URL, so that it knows that there is no more
 // redirection HTTP code, and another time when the actual destination URL is
 // fetched to be visited).
