@@ -183,8 +183,11 @@ func (this *Crawler) queueWorker(ctx *URLContext) *worker {
 
 //
 func (this *Crawler) checkWorkers() {
-	if this.workerCount < this.Options.MaxWorkers {
+	if this.workerCount -1 < this.Options.MaxWorkers {
 		diff := this.Options.MaxWorkers - this.workerCount - 1
+		if diff <= 0 {
+			return
+		}
 		a := 0 //Counter
 		keys := make(map[string]interface{}, diff)
 		for k := range this.queuedWorkers {
@@ -384,7 +387,8 @@ func (this *Crawler) collectUrls() error {
 		//
 		// Check if refcount is zero - MUST be before the select statement, so that if
 		// no valid seeds are enqueued, the crawler stops.
-		if len(this.workers) < (this.Options.MaxWorkers) {
+		avgWorkerQueLen := 100
+		if this.pushPopRefCount < (this.Options.MaxWorkers * avgWorkerQueLen / 4) {
 			select {
 			case this.Options.FillQueueChan <- true:
 
