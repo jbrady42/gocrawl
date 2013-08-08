@@ -396,10 +396,10 @@ func (this *Crawler) collectUrls() error {
 
 		}
 		this.logFunc(LogTrace,"pushPopRefCount: %v enqueue length: %v active workers: %v queued workers: %v\n", this.pushPopRefCount, len(this.enqueue), len(this.workers), len(this.queuedWorkers))
-		if this.pushPopRefCount == 0 && len(this.enqueue) == 0 && false {
+		if this.pushPopRefCount == 0 && len(this.enqueue) == 0 &&  len(this.workers) == 0 {
 			this.logFunc(LogInfo, "sending STOP signals...")
-			//close(this.stop)
-			//return nil
+			close(this.stop)
+			return nil
 		}
 
 		select {
