@@ -2,7 +2,6 @@
 package gocrawl
 
 import (
-	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -197,11 +196,11 @@ func (this *Crawler) checkWorkers() {
 				break
 			}
 		}
-		fmt.Printf("checkWorkers launching %v of %v queued workers. Free capacity %v\n", len(keys), len(this.queuedWorkers), diff)
+		this.logFunc(LogTrace,"checkWorkers launching %v of %v queued workers. Free capacity %v\n", len(keys), len(this.queuedWorkers), diff)
 
 		for k := range keys {
 			w := this.queuedWorkers[k]
-			fmt.Println("Key: " + k)
+			this.logFunc(LogTrace,"Key: " + k)
 			// Launch worker
 			go w.run()
 			this.workerCount += 1
@@ -396,7 +395,7 @@ func (this *Crawler) collectUrls() error {
 			}
 
 		}
-		fmt.Printf("pushPopRefCount: %v enqueue length: %v active workers: %v queued workers: %v\n", this.pushPopRefCount, len(this.enqueue), len(this.workers), len(this.queuedWorkers))
+		this.logFunc(LogTrace,"pushPopRefCount: %v enqueue length: %v active workers: %v queued workers: %v\n", this.pushPopRefCount, len(this.enqueue), len(this.workers), len(this.queuedWorkers))
 		if this.pushPopRefCount == 0 && len(this.enqueue) == 0 && false {
 			this.logFunc(LogInfo, "sending STOP signals...")
 			//close(this.stop)
